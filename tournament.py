@@ -14,14 +14,21 @@ order corrects for imbalances due to both starting position and initiative.
 import itertools
 import random
 import warnings
-
+import multiprocessing as mp
+from multiprocessing import BoundedSemaphore
+from threading import Thread, Lock
 from collections import namedtuple
-
 from isolation import Board
 from sample_players import (RandomPlayer, open_move_score,
                             improved_score, center_score)
 from game_agent import (MinimaxPlayer, AlphaBetaPlayer, custom_score,
-                        custom_score_2, custom_score_3)
+                        custom_score_2, custom_score_3, custom_score_4)
+
+from io import StringIO
+import sys
+
+mutex = Lock()
+
 
 NUM_MATCHES = 5  # number of matches against each opponent
 TIME_LIMIT = 150  # number of milliseconds before timeout
@@ -122,27 +129,39 @@ def play_matches(cpu_agents, test_agents, num_matches):
     if total_forfeits:
         print(("\nYour agents forfeited {} games while there were still " +
                "legal moves available to play.\n").format(total_forfeits))
+    
+def main(accumulator, exp_num, lock):
+    lock.acquire()
+    print("started exp",exp_num)
+
+    default_stdout = sys.stdout
+    output = StringIO()
+    sys.stdout = output
 
 
-def main():
-
+    result = ""
     # Define two agents to compare -- these agents will play from the same
     # starting position against the same adversaries in the tournament
     test_agents = [
         Agent(AlphaBetaPlayer(score_fn=improved_score), "AB_Improved"),
+        Agent(AlphaBetaPlayer(score_fn=open_move_score), "AB_Open"),
         Agent(AlphaBetaPlayer(score_fn=custom_score), "AB_Custom"),
         Agent(AlphaBetaPlayer(score_fn=custom_score_2), "AB_Custom_2"),
-        Agent(AlphaBetaPlayer(score_fn=custom_score_3), "AB_Custom_3")
+        Agent(AlphaBetaPlayer(score_fn=custom_score_3), "AB_Custom_3"),
+        Agent(AlphaBetaPlayer(score_fn=custom_score_4), "AB_Custom_4")
     ]
-
     # Define a collection of agents to compete against the test agents
     cpu_agents = [
         Agent(RandomPlayer(), "Random"),
         Agent(MinimaxPlayer(score_fn=open_move_score), "MM_Open"),
         Agent(MinimaxPlayer(score_fn=center_score), "MM_Center"),
+        Agent(MinimaxPlayer(score_fn=improved_score), "MM_Custom"),
+        Agent(MinimaxPlayer(score_fn=custom_score_2), "MM_Custom_2"),
         Agent(MinimaxPlayer(score_fn=improved_score), "MM_Improved"),
         Agent(AlphaBetaPlayer(score_fn=open_move_score), "AB_Open"),
         Agent(AlphaBetaPlayer(score_fn=center_score), "AB_Center"),
+        Agent(AlphaBetaPlayer(score_fn=custom_score), "AB_Custom"),
+        Agent(AlphaBetaPlayer(score_fn=custom_score_2), "AB_Custom_2"),
         Agent(AlphaBetaPlayer(score_fn=improved_score), "AB_Improved")
     ]
 
@@ -150,8 +169,40 @@ def main():
     print("{:^74}".format("*************************"))
     print("{:^74}".format("Playing Matches"))
     print("{:^74}".format("*************************"))
-    play_matches(cpu_agents, test_agents, NUM_MATCHES)
+    print(play_matches(cpu_agents, test_agents, NUM_MATCHES))
+
+    sys.stdout = default_stdout
+    accumulator.put(output.getvalue())
+    print("ended experiment", exp_num)
+    lock.release()
 
 
 if __name__ == "__main__":
-    main()
+
+    accumulator = mp.Queue()
+
+    threads = 6#
+    num_experiments = 25
+
+
+    pool_semaphore = BoundedSemaphore(value=threads)
+
+    processes = [mp.Process(target=main,
+                            args=(accumulator, x, pool_semaphore)) for x in range(num_experiments)]
+    print("len(process): ", len(processes))
+    # Run processes
+    running_processes = 0
+    for process in processes:
+        process.start() # the shemaphore will lock the other threads
+
+
+    # Exit the completed processes
+    for process in processes:
+        process.join()
+
+    output = open("experiments_results.txt","w")
+
+    while(not accumulator.empty()):
+        output.write(accumulator.get())
+
+    output.close()
